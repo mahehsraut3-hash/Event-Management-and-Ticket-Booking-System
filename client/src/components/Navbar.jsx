@@ -1,10 +1,25 @@
 import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Ticket, Calendar, LayoutDashboard, QrCode, LogOut, User, Menu, X, Shield } from 'lucide-react';
+import {
+  Ticket,
+  Calendar,
+  LayoutDashboard,
+  QrCode,
+  LogOut,
+  User,
+  Menu,
+  X,
+  Shield,
+  ShieldCheck,
+  Sun,
+  Moon
+} from 'lucide-react';
 import useAuth from '../hooks/useAuth';
+import { useTheme } from '../context/ThemeContext';
 
 const Navbar = () => {
   const { isAuthenticated, user, role, isOrganizer, isAdmin, logout } = useAuth();
+  const { isDark, toggleTheme } = useTheme();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const navigate = useNavigate();
 
@@ -87,12 +102,30 @@ const Navbar = () => {
                   </Link>
                 </>
               )}
+              {/* Admin Links */}
+              {isAdmin && (
+                <Link
+                  to="/admin/dashboard"
+                  className="hover:text-violet-600 transition flex items-center gap-1.5 font-bold text-violet-700 bg-violet-50 px-2.5 py-1 rounded-xl"
+                >
+                  <ShieldCheck className="w-4 h-4 text-violet-600" /> Admin Console
+                </Link>
+              )}
             </>
           )}
         </nav>
 
         {/* Right Section / Auth Actions */}
         <div className="hidden md:flex items-center gap-3">
+          {/* Dark Mode Toggle */}
+          <button
+            onClick={toggleTheme}
+            className="p-2 text-slate-500 hover:text-indigo-600 hover:bg-slate-100 rounded-xl transition cursor-pointer"
+            title={isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+          >
+            {isDark ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-slate-600" />}
+          </button>
+
           {isAuthenticated ? (
             <div className="flex items-center gap-3">
               <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 border border-slate-200/80 rounded-xl">

@@ -52,6 +52,22 @@ const bookingSchema = new mongoose.Schema(
       enum: ['confirmed', 'cancelled', 'expired'],
       default: 'confirmed'
     },
+    razorpayOrderId: {
+      type: String,
+      default: null
+    },
+    razorpayPaymentId: {
+      type: String,
+      default: null
+    },
+    paymentDetails: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null
+    },
+    expiresAt: {
+      type: Date,
+      default: null
+    },
     createdAt: {
       type: Date,
       default: Date.now

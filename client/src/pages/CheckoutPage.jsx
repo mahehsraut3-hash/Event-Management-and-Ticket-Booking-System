@@ -10,10 +10,13 @@ import {
   Ticket,
   AlertCircle,
   CreditCard,
-  CheckCircle2
+  CheckCircle2,
+  Sparkles,
+  ExternalLink
 } from 'lucide-react';
 import api from '../services/api';
 import useAuth from '../hooks/useAuth';
+import { loadRazorpayScript } from '../utils/loadRazorpay';
 
 const formatDate = (dateString) => {
   if (!dateString) return '';
@@ -36,10 +39,26 @@ const CheckoutPage = () => {
   const [loading, setLoading] = useState(!location.state?.event);
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [gatewayConfig, setGatewayConfig] = useState(null);
 
   // Attendee Form State
   const [attendeeName, setAttendeeName] = useState(user?.name || '');
   const [attendeeEmail, setAttendeeEmail] = useState(user?.email || '');
+
+  // Load gateway config (public key, mode)
+  useEffect(() => {
+    const fetchConfig = async () => {
+      try {
+        const res = await api.get('/payments/config');
+        if (res.data?.success) {
+          setGatewayConfig(res.data.data);
+        }
+      } catch (err) {
+        console.warn('Could not fetch payment gateway config:', err);
+      }
+    };
+    fetchConfig();
+  }, []);
 
   // If page was loaded directly without navigation state, fetch event details
   useEffect(() => {
@@ -50,7 +69,6 @@ const CheckoutPage = () => {
           const res = await api.get(`/events/${eventId}`);
           if (res.data?.success && res.data?.data?.event) {
             setEvent(res.data.data.event);
-            // Default 1 ticket for first tier if none in state
             const firstTier = res.data.data.event.ticketTypes?.[0];
             if (firstTier && selectedTickets.length === 0) {
               setSelectedTickets([
@@ -76,18 +94,20 @@ const CheckoutPage = () => {
   const totalAmount = selectedTickets.reduce((acc, t) => acc + t.quantity * t.price, 0);
   const totalQuantity = selectedTickets.reduce((acc, t) => acc + t.quantity, 0);
 
-  const handleConfirmBooking = async (e) => {
-    e.preventDefault();
+  // Process Booking and Trigger Payment Flow
+  const handleProceedToPayment = async (isTestSimulate = false) => {
     setErrorMessage('');
 
     if (selectedTickets.length === 0 || totalQuantity === 0) {
-      setErrorMessage('Please select at least 1 ticket before confirming booking.');
+      setErrorMessage('Please select at least 1 ticket before proceeding.');
       return;
     }
 
     try {
       setSubmitting(true);
-      const res = await api.post('/bookings', {
+
+      // 1. Reserve seats atomically and create pending booking
+      const bookingRes = await api.post('/bookings', {
         eventId,
         tickets: selectedTickets.map((t) => ({
           ticketTypeName: t.ticketTypeName,
@@ -95,18 +115,129 @@ const CheckoutPage = () => {
         }))
       });
 
-      if (res.data?.success && res.data?.data?.booking) {
-        const booking = res.data.data.booking;
-        navigate(`/bookings/confirmation/${booking._id}`, {
-          state: { booking }
-        });
-      } else {
-        throw new Error(res.data?.message || 'Failed to complete reservation');
+      if (!bookingRes.data?.success || !bookingRes.data?.data?.booking) {
+        throw new Error(bookingRes.data?.message || 'Failed to reserve booking');
       }
+
+      const booking = bookingRes.data.data.booking;
+
+      // 2. Create Payment Order
+      const orderRes = await api.post('/payments/create-order', {
+        bookingId: booking._id
+      });
+
+      if (!orderRes.data?.success) {
+        throw new Error(orderRes.data?.message || 'Failed to create payment order');
+      }
+
+      const orderData = orderRes.data.data;
+
+      // If user selected instant test simulation or if in simulated mode without live Razorpay SDK keys:
+      if (isTestSimulate || orderData.isSimulated) {
+        // Direct test verification
+        const verifyRes = await api.post('/payments/verify', {
+          bookingId: booking._id,
+          razorpay_order_id: orderData.orderId,
+          razorpay_payment_id: `pay_sim_${Date.now()}`,
+          razorpay_signature: `sig_sim_${Date.now()}`
+        });
+
+        if (verifyRes.data?.success) {
+          navigate(`/payments/status/${booking._id}?status=success`);
+          return;
+        } else {
+          throw new Error('Test verification failed');
+        }
+      }
+
+      // 3. Attempt to load Razorpay official checkout SDK
+      const isScriptLoaded = await loadRazorpayScript();
+
+      if (!isScriptLoaded || !window.Razorpay) {
+        console.warn('Razorpay SDK could not be loaded from CDN. Falling back to reservation confirmation.');
+        navigate(`/bookings/confirmation/${booking._id}`, {
+          state: {
+            booking,
+            warning: 'Could not load Razorpay SDK. You can complete payment using the simulated checkout.'
+          }
+        });
+        return;
+      }
+
+      // 4. Open Razorpay Checkout modal
+      const options = {
+        key: orderData.keyId,
+        amount: orderData.amount,
+        currency: orderData.currency || 'INR',
+        name: 'Ticket Booking System (TBS)',
+        description: `${event.title} (${totalQuantity} tickets)`,
+        image: event.bannerImage || 'https://images.unsplash.com/photo-1501281668745-f7f57925c3b4?auto=format&fit=crop&w=200&q=80',
+        order_id: orderData.orderId,
+        handler: async function (response) {
+          try {
+            setSubmitting(true);
+            const verifyRes = await api.post('/payments/verify', {
+              bookingId: booking._id,
+              razorpay_order_id: response.razorpay_order_id,
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_signature: response.razorpay_signature
+            });
+
+            if (verifyRes.data?.success) {
+              navigate(
+                `/payments/status/${booking._id}?status=success&paymentId=${response.razorpay_payment_id}`
+              );
+            } else {
+              navigate(
+                `/payments/status/${booking._id}?status=failed&reason=Signature+verification+failed`
+              );
+            }
+          } catch (vErr) {
+            console.error('Verification error:', vErr);
+            navigate(
+              `/payments/status/${booking._id}?status=failed&reason=${encodeURIComponent(
+                vErr.response?.data?.message || 'Verification failed'
+              )}`
+            );
+          } finally {
+            setSubmitting(false);
+          }
+        },
+        prefill: {
+          name: attendeeName,
+          email: attendeeEmail
+        },
+        theme: {
+          color: '#4F46E5'
+        },
+        modal: {
+          ondismiss: function () {
+            setSubmitting(false);
+            navigate(`/bookings/confirmation/${booking._id}`, {
+              state: {
+                booking,
+                warning: 'Payment window was dismissed. You have 15 minutes before your seats are released.'
+              }
+            });
+          }
+        }
+      };
+
+      const rzpInstance = new window.Razorpay(options);
+
+      rzpInstance.on('payment.failed', function (response) {
+        setSubmitting(false);
+        const reason = response.error?.description || 'Transaction declined by bank';
+        navigate(
+          `/payments/status/${booking._id}?status=failed&reason=${encodeURIComponent(reason)}`
+        );
+      });
+
+      rzpInstance.open();
     } catch (err) {
-      console.error('Booking submission error:', err);
+      console.error('Checkout error:', err);
       setErrorMessage(
-        err.response?.data?.message || err.message || 'Booking reservation failed. Please try again.'
+        err.response?.data?.message || err.message || 'Payment processing failed. Please try again.'
       );
     } finally {
       setSubmitting(false);
@@ -154,21 +285,23 @@ const CheckoutPage = () => {
       </button>
 
       <div className="mb-8">
-        <h1 className="text-3xl font-extrabold text-slate-900 tracking-tight">Checkout & Order Review</h1>
-        <p className="text-sm text-slate-600 mt-1">Review your tickets and confirm your reservation.</p>
+        <h1 className="text-3xl font-extrabold text-slate-900 tracking-tight">Checkout & Payment</h1>
+        <p className="text-sm text-slate-600 mt-1">
+          Review your tickets, attendee credentials, and select payment method.
+        </p>
       </div>
 
       {errorMessage && (
         <div className="mb-8 bg-rose-50 border border-rose-200 text-rose-700 px-5 py-4 rounded-2xl text-sm flex items-start gap-3">
           <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
           <div className="flex-1">
-            <span className="font-semibold block">Reservation Error</span>
+            <span className="font-semibold block">Booking & Payment Error</span>
             <span>{errorMessage}</span>
           </div>
         </div>
       )}
 
-      <form onSubmit={handleConfirmBooking} className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         {/* Left Column: Attendee Details & Event Summary */}
         <div className="lg:col-span-2 space-y-6">
           {/* Event Preview Card */}
@@ -230,23 +363,32 @@ const CheckoutPage = () => {
                   className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-600/20 focus:border-indigo-600 text-sm"
                 />
                 <span className="text-[11px] text-slate-400 mt-1 block">
-                  Your ticket confirmation and digital QR passes will be associated with this account.
+                  Digital QR admission passes and receipts will be sent to this account.
                 </span>
               </div>
             </div>
           </div>
 
-          {/* Payment Method Notice */}
-          <div className="bg-indigo-50/60 border border-indigo-200 rounded-3xl p-6">
+          {/* Payment Gateway Information Box */}
+          <div className="bg-indigo-50/70 border border-indigo-200 rounded-3xl p-6">
             <div className="flex items-start gap-3.5">
-              <div className="p-2.5 bg-indigo-600 text-white rounded-xl flex-shrink-0">
+              <div className="p-2.5 bg-indigo-600 text-white rounded-2xl flex-shrink-0">
                 <CreditCard className="w-5 h-5" />
               </div>
-              <div>
-                <h4 className="text-sm font-bold text-indigo-950">Phase 3 Mock Payment Simulation</h4>
-                <p className="text-xs text-indigo-800 mt-1 leading-relaxed">
-                  Upon confirming your booking, seats will be reserved atomically preventing any overselling. You can instantly simulate full payment with the 1-click test checkout button on the next screen.
+              <div className="flex-1">
+                <div className="flex items-center gap-2">
+                  <h4 className="text-sm font-bold text-indigo-950">Razorpay Payment Gateway</h4>
+                  <span className="px-2 py-0.5 bg-indigo-200 text-indigo-900 rounded-md text-[10px] font-bold uppercase tracking-wider">
+                    {gatewayConfig?.isSimulated ? 'Simulation / Test Mode' : 'Test Mode'}
+                  </span>
+                </div>
+                <p className="text-xs text-indigo-900/80 mt-1 leading-relaxed">
+                  Secured with cryptographic HMAC-SHA256 signature verification and automatic 15-minute reservation expiry locks. Card, UPI, Netbanking, and Wallets supported.
                 </p>
+                <div className="mt-3 flex items-center gap-4 text-[11px] text-indigo-700 font-semibold">
+                  <span>🔒 256-Bit SSL Encryption</span>
+                  <span>⏱️ 15-Min Inventory Hold</span>
+                </div>
               </div>
             </div>
           </div>
@@ -279,7 +421,7 @@ const CheckoutPage = () => {
                 <span>${totalAmount}</span>
               </div>
               <div className="flex justify-between text-slate-500">
-                <span>Platform Booking Fee</span>
+                <span>Convenience / Platform Fee</span>
                 <span className="text-emerald-600 font-semibold">Free ($0.00)</span>
               </div>
               <div className="pt-2 border-t border-slate-100 flex justify-between text-base font-extrabold text-slate-900">
@@ -295,32 +437,47 @@ const CheckoutPage = () => {
                 <span>Instant reservation with zero overselling</span>
               </div>
               <div className="flex items-center gap-1.5">
-                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0" />
-                <span>Full refund if cancelled before event starts</span>
+                <Clock className="w-3.5 h-3.5 text-amber-500 flex-shrink-0" />
+                <span>Held seats locked for 15 minutes</span>
               </div>
             </div>
 
-            {/* Submit Button */}
-            <button
-              type="submit"
-              disabled={submitting || totalQuantity === 0}
-              className="w-full py-4 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-2xl shadow-sm hover:shadow-md transition flex items-center justify-center gap-2 text-sm disabled:opacity-50"
-            >
-              {submitting ? (
-                <>
-                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                  <span>Reserving Seats...</span>
-                </>
-              ) : (
-                <>
-                  <ShieldCheck className="w-4 h-4" />
-                  <span>Confirm Booking (${totalAmount})</span>
-                </>
-              )}
-            </button>
+            {/* Action Buttons */}
+            <div className="space-y-3">
+              {/* Primary Pay Button */}
+              <button
+                type="button"
+                onClick={() => handleProceedToPayment(false)}
+                disabled={submitting || totalQuantity === 0}
+                className="w-full py-4 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-2xl shadow-sm hover:shadow-md transition flex items-center justify-center gap-2 text-sm disabled:opacity-50 cursor-pointer"
+              >
+                {submitting ? (
+                  <>
+                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                    <span>Processing Payment...</span>
+                  </>
+                ) : (
+                  <>
+                    <CreditCard className="w-4 h-4" />
+                    <span>Pay with Razorpay (${totalAmount})</span>
+                  </>
+                )}
+              </button>
+
+              {/* Instant Test Mode Simulation Button */}
+              <button
+                type="button"
+                onClick={() => handleProceedToPayment(true)}
+                disabled={submitting || totalQuantity === 0}
+                className="w-full py-3 px-4 bg-slate-900 hover:bg-slate-800 text-white font-medium rounded-2xl text-xs transition flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                <span>Instant Test Payment (1-Click)</span>
+              </button>
+            </div>
           </div>
         </div>
-      </form>
+      </div>
     </div>
   );
 };

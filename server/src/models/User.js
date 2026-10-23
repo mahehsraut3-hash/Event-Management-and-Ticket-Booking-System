@@ -31,6 +31,15 @@ const userSchema = new mongoose.Schema(
       },
       default: 'attendee'
     },
+    isApproved: {
+      type: Boolean,
+      default: true
+    },
+    status: {
+      type: String,
+      enum: ['approved', 'pending', 'suspended'],
+      default: 'approved'
+    },
     createdAt: {
       type: Date,
       default: Date.now
@@ -151,6 +160,56 @@ const User = {
       return await MongooseUser.countDocuments(query);
     }
     return memoryStore.users.length;
+  },
+
+  find: (filter = {}) => {
+    if (isMongoLive()) {
+      return MongooseUser.find(filter);
+    }
+    let selectFields = '';
+    const executor = async () => {
+      let results = memoryStore.users.filter(u => {
+        if (filter.role && u.role !== filter.role) return false;
+        if (filter.status && u.status !== filter.status) return false;
+        return true;
+      });
+
+      return results.map(u => {
+        const copy = JSON.parse(JSON.stringify(u));
+        if (selectFields.includes('-passwordHash')) {
+          delete copy.passwordHash;
+        }
+        return copy;
+      });
+    };
+
+    return {
+      select: function (fields) {
+        selectFields = fields;
+        return this;
+      },
+      sort: function () {
+        return this;
+      },
+      then: (resolve, reject) => executor().then(resolve, reject),
+      catch: (reject) => executor().catch(reject)
+    };
+  },
+
+  findByIdAndUpdate: async (id, update, options = {}) => {
+    if (isMongoLive()) {
+      return await MongooseUser.findByIdAndUpdate(id, update, options);
+    }
+    const index = memoryStore.users.findIndex(u => u._id.toString() === id.toString());
+    if (index === -1) return null;
+    const current = memoryStore.users[index];
+    if (update.$set) {
+      Object.assign(current, update.$set);
+    } else {
+      Object.assign(current, update);
+    }
+    current.updatedAt = new Date();
+    return JSON.parse(JSON.stringify(current));
   }
 };
 

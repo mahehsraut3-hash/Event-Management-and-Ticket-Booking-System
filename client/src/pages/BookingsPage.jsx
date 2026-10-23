@@ -242,6 +242,7 @@ const BookingsPage = () => {
           {filteredBookings.map((b) => {
             const isPaid = b.paymentStatus === 'paid';
             const isCancelled = b.bookingStatus === 'cancelled';
+            const isExpired = b.bookingStatus === 'expired';
             const eventStarted = b.event && new Date(b.event.startDateTime) <= new Date();
             const isActionLoading = actionLoadingId === b._id;
             const isExpanded = expandedBookingId === b._id;
@@ -281,6 +282,10 @@ const BookingsPage = () => {
                           {isCancelled ? (
                             <span className="px-2.5 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-slate-100 text-slate-600 flex items-center gap-1">
                               <XCircle className="w-3.5 h-3.5" /> Cancelled
+                            </span>
+                          ) : isExpired ? (
+                            <span className="px-2.5 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-rose-100 text-rose-800 flex items-center gap-1">
+                              <Clock className="w-3.5 h-3.5" /> Expired
                             </span>
                           ) : isPaid ? (
                             <span className="px-2.5 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-emerald-100 text-emerald-800 flex items-center gap-1">
@@ -338,30 +343,49 @@ const BookingsPage = () => {
                       <div className="flex items-center gap-2">
                         {/* View QR Tickets Button (if paid) */}
                         {isPaid && !isCancelled && (
-                          <button
-                            onClick={() => handleToggleTickets(b._id)}
-                            className="px-4 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl text-xs font-bold transition flex items-center gap-1.5"
-                          >
-                            <QrCode className="w-3.5 h-3.5" />
-                            <span>{isExpanded ? 'Hide QR Tickets' : 'View QR Tickets'}</span>
-                            {isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-                          </button>
+                          <>
+                            <button
+                              onClick={() => handleToggleTickets(b._id)}
+                              className="px-4 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl text-xs font-bold transition flex items-center gap-1.5"
+                            >
+                              <QrCode className="w-3.5 h-3.5" />
+                              <span>{isExpanded ? 'Hide QR Tickets' : 'View QR Tickets'}</span>
+                              {isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                            </button>
+                            <Link
+                              to={`/payments/status/${b._id}`}
+                              className="px-3 py-2 bg-slate-50 hover:bg-slate-100 text-slate-600 rounded-xl text-xs font-semibold border border-slate-200 transition"
+                              title="View Payment Receipt"
+                            >
+                              Receipt
+                            </Link>
+                          </>
                         )}
 
-                        {/* Simulate Pay Now Button if pending */}
-                        {!isPaid && !isCancelled && (
-                          <button
-                            onClick={() => handlePay(b._id)}
-                            disabled={isActionLoading}
-                            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-xs transition flex items-center gap-1.5 disabled:opacity-50"
+                        {/* Pay Now Button if pending */}
+                        {!isPaid && !isCancelled && !isExpired && (
+                          <Link
+                            to={`/bookings/confirmation/${b._id}`}
+                            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-xs transition flex items-center gap-1.5"
                           >
-                            <Sparkles className="w-3.5 h-3.5" />
-                            <span>Pay Now</span>
-                          </button>
+                            <CreditCard className="w-3.5 h-3.5" />
+                            <span>Pay with Razorpay</span>
+                          </Link>
+                        )}
+
+                        {/* If expired */}
+                        {isExpired && (
+                          <Link
+                            to={`/events/${b.event?._id || b.event}`}
+                            className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold transition flex items-center gap-1.5"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" />
+                            <span>Re-book Event</span>
+                          </Link>
                         )}
 
                         {/* Cancel Booking Button */}
-                        {!isCancelled && !eventStarted && (
+                        {!isCancelled && !isExpired && !eventStarted && (
                           <button
                             onClick={() => handleCancel(b._id)}
                             disabled={isActionLoading}

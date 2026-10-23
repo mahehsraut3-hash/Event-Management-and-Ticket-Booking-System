@@ -2,6 +2,9 @@ const { Booking, Event, Ticket } = require('../models');
 const { generateTicketCode, generateSignedQrToken } = require('../utils/qrToken');
 const { generateId } = require('../models/dataStore');
 const { successResponse, errorResponse } = require('../utils/apiResponse');
+const { checkAndExpireSingleBooking } = require('../utils/bookingExpiry');
+const { generateTicketsForBooking } = require('../utils/ticketGenerator');
+const { sendBookingConfirmationEmail } = require('../utils/emailService');
 
 /**
  * @desc    Create online ticket booking with atomic inventory reservation
@@ -85,14 +88,18 @@ const createBooking = async (req, res) => {
       }
     }
 
-    // 5. Create Booking record
+    // 5. Create Booking record with expiration timestamp (default 15 mins)
+    const expirationMinutes = parseInt(process.env.BOOKING_EXPIRATION_MINUTES, 10) || 15;
+    const expiresAt = new Date(Date.now() + expirationMinutes * 60 * 1000);
+
     const booking = await Booking.create({
       user: userId,
       event: event._id,
       tickets: reservedTickets,
       totalAmount,
       paymentStatus: 'pending',
-      bookingStatus: 'confirmed'
+      bookingStatus: 'confirmed',
+      expiresAt
     });
 
     const populatedBooking = await Booking.findById(booking._id)
@@ -141,12 +148,20 @@ const getBookingById = async (req, res) => {
     const { id } = req.params;
     const userId = req.user._id;
 
-    const booking = await Booking.findById(id)
+    let booking = await Booking.findById(id)
       .populate('event', 'title bannerImage startDateTime endDateTime venue city status organizer')
       .populate('user', 'name email');
 
     if (!booking) {
       return errorResponse(res, 404, 'Booking not found');
+    }
+
+    // Check if pending booking has expired
+    const isExpired = await checkAndExpireSingleBooking(booking);
+    if (isExpired) {
+      booking = await Booking.findById(id)
+        .populate('event', 'title bannerImage startDateTime endDateTime venue city status organizer')
+        .populate('user', 'name email');
     }
 
     // Authorization: owner, event organizer, or admin
@@ -196,53 +211,27 @@ const payBooking = async (req, res) => {
       id,
       {
         $set: {
-          paymentStatus: 'paid'
+          paymentStatus: 'paid',
+          bookingStatus: 'confirmed'
         }
       },
       { new: true }
     );
 
-    // Generate one cryptographically signed Ticket per reserved seat
-    const existingTickets = await Ticket.find({ booking: booking._id });
-    const generatedTickets = [];
-
-    if (existingTickets.length === 0 && Array.isArray(booking.tickets)) {
-      const event = await Event.findById(booking.event._id || booking.event);
-      const city = event?.city || 'TBS';
-
-      for (const item of booking.tickets) {
-        const qty = item.quantity || 1;
-        for (let i = 0; i < qty; i++) {
-          const ticketId = generateId();
-          const ticketCode = generateTicketCode(city);
-          const qrData = generateSignedQrToken({
-            ticketId,
-            ticketCode,
-            eventId: (booking.event._id || booking.event).toString(),
-            userId: (booking.user._id || booking.user).toString(),
-            tierName: item.ticketTypeName
-          });
-
-          const newTicket = await Ticket.create({
-            _id: ticketId,
-            id: ticketId,
-            booking: booking._id,
-            event: booking.event._id || booking.event,
-            user: booking.user._id || booking.user,
-            ticketTypeName: item.ticketTypeName,
-            ticketCode,
-            qrData,
-            isUsed: false,
-            usedAt: null
-          });
-          generatedTickets.push(newTicket);
-        }
-      }
-    }
+    // Generate cryptographic QR tickets
+    const generatedTickets = await generateTicketsForBooking(updatedBooking);
 
     const populated = await Booking.findById(id)
       .populate('event', 'title bannerImage startDateTime endDateTime venue city')
       .populate('user', 'name email');
+
+    // Send confirmation email asynchronously
+    sendBookingConfirmationEmail({
+      booking: populated,
+      user: populated.user,
+      tickets: generatedTickets,
+      event: populated.event
+    }).catch(err => console.error('[BookingController] Async email error:', err.message));
 
     return successResponse(res, 200, 'Mock payment completed successfully! Booking marked as paid.', {
       booking: populated,
